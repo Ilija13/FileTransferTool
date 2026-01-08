@@ -43,10 +43,22 @@
                 Console.WriteLine("Enter the destination directory path: ");
                 string path = Console.ReadLine()?.Trim('"').Replace('/', '\\') ?? "";
 
-                if (Directory.Exists(path))
-                    return path;
+                if (!Directory.Exists(path))
+                {
+                    Console.WriteLine("The destination directory does not exist. Please try again.");
+                    continue;
+                }
 
-                Console.WriteLine("The destination directory does not exist. Please try again.");
+                string intendedDestPath = Path.Combine(Path.GetFullPath(path), Path.GetFileName(SourcePath));
+                string normalizedSourcePath = Path.GetFullPath(SourcePath);
+
+                if (string.Equals(normalizedSourcePath, intendedDestPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("Destination file cannot be the same as the source file. Please choose another folder.");
+                    continue;
+                }
+
+                return path;
             }
         }
 
