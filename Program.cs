@@ -1,3 +1,4 @@
-﻿// See https://aka.ms/new-console-template for more information
-Console.WriteLine("Hello, World!");
-while
+﻿using FileTransferTool.UI;
+
+var console = new ConsoleUI();
+console.Run();
