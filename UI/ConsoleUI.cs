@@ -81,8 +81,7 @@
 
             Console.WriteLine($"Source file: {source}");
             Console.WriteLine($"Destination file: {destination}");
-            Console.WriteLine($"File size: {fileInfo.Length:N0} bytes ({fileInfo.Length / (1024.0 * 1024.0):F2} MB)"
-            );
+            Console.WriteLine($"File size: {fileInfo.Length:N0} bytes ({fileInfo.Length / (1024.0 * 1024.0):F2} MB)");
         }
 
         private DestinationValidationResult ValidateDestination(string path, out string validatedPath)

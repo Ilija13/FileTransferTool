@@ -1,4 +1,5 @@
-﻿using FileTransferTool.UI;
+﻿using FileTransferTool.Services;
+using FileTransferTool.UI;
 
 var console = new ConsoleUI();
 console.Run();
@@ -7,8 +8,8 @@ if (!string.IsNullOrWhiteSpace(console.DestinationDirectory))
 {
     try
     {
-        //// TODO service
-        Console.WriteLine("NEsto");
+        var fileTransferService = new FileTransferService();
+        await fileTransferService.TransferFileAsync(console.SourcePath, console.DestinationDirectory);
     }
     catch (Exception ex)
     {
