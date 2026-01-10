@@ -33,6 +33,8 @@ namespace FileTransferTool.Services
             }
 
             Console.WriteLine("\n\nAll chunks transferred successfully!");
+
+            await VerifyCompleteFile(sourceFilePath, destinationFilePath);
         }
 
         private async Task TransferChunk(string sourcePath, string destinationPath, long chunkIndex, long fileSize)
@@ -88,7 +90,7 @@ namespace FileTransferTool.Services
 
                 await WriteChunkToDestination(destinationPath, chunk);
 
-                string destinationHash = await ReadAndHashDestinationChunk(destinationPath, chunk.Position, chunk.Size);
+                string? destinationHash = await ReadAndHashDestinationChunk(destinationPath, chunk.Position, chunk.Size);
 
                 if (destinationHash == null)
                 {
@@ -127,7 +129,7 @@ namespace FileTransferTool.Services
             }
         }
 
-        private async Task<string> ReadAndHashDestinationChunk(string destinationPath, long position, int chunkSize)
+        private async Task<string?> ReadAndHashDestinationChunk(string destinationPath, long position, int chunkSize)
         {
             byte[] verifyBuffer = new byte[chunkSize];
 
@@ -143,6 +145,43 @@ namespace FileTransferTool.Services
                 }
 
                 return CalculateMD5(verifyBuffer, chunkSize);
+            }
+        }
+
+        private async Task VerifyCompleteFile(string sourceFilePath, string destinationFilePath)
+        {
+            Console.WriteLine("Verifying entire file integrity...\n");
+
+            Console.Write("Calculating SHA256 for source file... ");
+            string sourceFileHash = await CalculateFileSHA256(sourceFilePath);
+            Console.WriteLine("Done");
+
+            Console.Write("Calculating SHA256 for destination file... ");
+            string destinationFileHash = await CalculateFileSHA256(destinationFilePath);
+            Console.WriteLine("Done");
+
+            Console.WriteLine("\n=== Final File Verification (SHA256) ===");
+            Console.WriteLine($"Source:      {sourceFileHash}");
+            Console.WriteLine($"Destination: {destinationFileHash}");
+
+            if (sourceFileHash == destinationFileHash)
+            {
+                Console.WriteLine("\n✓ File integrity verified successfully!");
+            }
+            else
+            {
+                Console.WriteLine("\nFile verification FAILED!");
+                throw new Exception("Final SHA256 hash verification failed - file integrity compromised!");
+            }
+        }
+
+        private async Task<string> CalculateFileSHA256(string filePath)
+        {
+            using (var sha256 = SHA256.Create())
+            using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 8192, true))
+            {
+                byte[] hash = await Task.Run(() => sha256.ComputeHash(stream));
+                return BitConverter.ToString(hash);
             }
         }
 

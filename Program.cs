@@ -13,7 +13,7 @@ if (!string.IsNullOrWhiteSpace(console.DestinationDirectory))
     }
     catch (Exception ex)
     {
-        //Console.WriteLine($"\n File transfer failed: {ex.Message}");
+        Console.WriteLine($"\n File transfer failed: {ex.Message}");
     }
 }
 
