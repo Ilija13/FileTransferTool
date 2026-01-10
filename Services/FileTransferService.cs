@@ -7,6 +7,8 @@ namespace FileTransferTool.Services
         private const int CHUNK_SIZE = 1024 * 1024;
         private const int MAX_RETRY_ATTEMPTS = 3;
 
+        private readonly List<ChunkInfo> transferedChunks = new List<ChunkInfo>();
+
         public async Task TransferFileAsync(string sourceFilePath, string destinationDirectory)
         {
             string fileName = Path.GetFileName(sourceFilePath);
@@ -34,6 +36,8 @@ namespace FileTransferTool.Services
 
             Console.WriteLine("\n\nAll chunks transferred successfully!");
 
+            DisplayChunkChecksums();
+
             await VerifyCompleteFile(sourceFilePath, destinationFilePath);
         }
 
@@ -56,6 +60,7 @@ namespace FileTransferTool.Services
             };
 
             await WriteAndVerifyChunk(destinationPath, chunkInfo);
+            transferedChunks.Add(chunkInfo);
         }
 
         private async Task<(byte[] buffer, string hash)> ReadChunkFromSource(string sourcePath, long position, int chunkSize)
@@ -173,6 +178,20 @@ namespace FileTransferTool.Services
                 Console.WriteLine("\nFile verification FAILED!");
                 throw new Exception("Final SHA256 hash verification failed - file integrity compromised!");
             }
+        }
+
+        private void DisplayChunkChecksums()
+        {
+            Console.WriteLine("=== Chunk Checksums (MD5) ===");
+
+            var orderedChunks = transferedChunks.OrderBy(c => c.Position).ToList();
+
+            foreach (var chunk in orderedChunks)
+            {
+                Console.WriteLine($"{chunk.Index + 1}) position = {chunk.Position}, hash = {chunk.Hash}");
+            }
+
+            Console.WriteLine();
         }
 
         private async Task<string> CalculateFileSHA256(string filePath)
