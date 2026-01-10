@@ -41,13 +41,13 @@ namespace FileTransferTool.Services
             await VerifyCompleteFile(sourceFilePath, destinationFilePath);
         }
 
-        private async Task TransferChunk(string sourcePath, string destinationPath, long chunkIndex, long fileSize)
+        private async Task TransferChunk(string sourceFilePath, string destinationFilePath, long chunkIndex, long fileSize)
         {
             long startingPosition = chunkIndex * CHUNK_SIZE;
             int chunkSize = (int)Math.Min(CHUNK_SIZE, fileSize - startingPosition);
             long totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-            var (buffer, sourceHash) = await ReadChunkFromSource(sourcePath, startingPosition, chunkSize);
+            var (buffer, sourceHash) = await ReadAndHashSourceChunk(sourceFilePath, startingPosition, chunkSize);
 
             var chunkInfo = new ChunkInfo
             {
@@ -59,19 +59,19 @@ namespace FileTransferTool.Services
                 TotalChunks = totalChunks
             };
 
-            await WriteAndVerifyChunk(destinationPath, chunkInfo);
+            await WriteAndVerifyChunk(destinationFilePath, chunkInfo);
             transferedChunks.Add(chunkInfo);
         }
 
-        private async Task<(byte[] buffer, string hash)> ReadChunkFromSource(string sourcePath, long position, int chunkSize)
+        private async Task<(byte[] buffer, string hash)> ReadAndHashSourceChunk(string sourceFilePath, long position, int chunkSize)
         {
             byte[] buffer = new byte[chunkSize];
 
-            using (var sourceStream = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sourceFileStream = new FileStream(sourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                sourceStream.Seek(position, SeekOrigin.Begin);
+                sourceFileStream.Seek(position, SeekOrigin.Begin);
 
-                int bytesRead = await sourceStream.ReadAsync(buffer, 0, chunkSize);
+                int bytesRead = await sourceFileStream.ReadAsync(buffer, 0, chunkSize);
 
                 if (bytesRead != chunkSize)
                 {
@@ -84,7 +84,7 @@ namespace FileTransferTool.Services
             }
         }
 
-        private async Task WriteAndVerifyChunk(string destinationPath, ChunkInfo chunk)
+        private async Task WriteAndVerifyChunk(string destinationFilePath, ChunkInfo chunkInfo)
         {
             bool verified = false;
             int attempts = 0;
@@ -93,56 +93,56 @@ namespace FileTransferTool.Services
             {
                 attempts++;
 
-                await WriteChunkToDestination(destinationPath, chunk);
+                await WriteChunkToDestination(destinationFilePath, chunkInfo);
 
-                string? destinationHash = await ReadAndHashDestinationChunk(destinationPath, chunk.Position, chunk.Size);
+                string? destinationHash = await ReadAndHashDestinationChunk(destinationFilePath, chunkInfo.Position, chunkInfo.Size);
 
                 if (destinationHash == null)
                 {
-                    Console.WriteLine($"Warning: Failed to read chunk for verification at position {chunk.Position}. Retrying...");
+                    Console.WriteLine($"Warning: Failed to read chunk for verification at position {chunkInfo.Position}. Retrying...");
                     continue;
                 }
 
-                if (chunk.Hash == destinationHash)
+                if (chunkInfo.Hash == destinationHash)
                 {
                     verified = true;
-                    Console.WriteLine($"Chunk {chunk.Index + 1}/{chunk.TotalChunks}: Position={chunk.Position}, Hash={chunk.Hash} [VERIFIED]");
+                    Console.WriteLine($"Chunk {chunkInfo.Index + 1}/{chunkInfo.TotalChunks}: Position={chunkInfo.Position}, Hash={chunkInfo.Hash} [VERIFIED]");
                 }
                 else
                 {
-                    Console.WriteLine($"Chunk {chunk.Index + 1}: Hash mismatch at position {chunk.Position}! " +
-                                    $"Source: {chunk.Hash}, Destination: {destinationHash}. " +
+                    Console.WriteLine($"Chunk {chunkInfo.Index + 1}: Hash mismatch at position {chunkInfo.Position}! " +
+                                    $"Source: {chunkInfo.Hash}, Destination: {destinationHash}. " +
                                     $"Retry attempt {attempts}/{MAX_RETRY_ATTEMPTS}");
                 }
             }
 
             if (!verified)
             {
-                throw new Exception($"Failed to verify chunk at position {chunk.Position} after {MAX_RETRY_ATTEMPTS} attempts. " +
-                                  $"Source hash: {chunk.Hash}");
+                throw new Exception($"Failed to verify chunk at position {chunkInfo.Position} after {MAX_RETRY_ATTEMPTS} attempts. " +
+                                  $"Source hash: {chunkInfo.Hash}");
             }
         }
 
-        private async Task WriteChunkToDestination(string destinationPath, ChunkInfo chunk)
+        private async Task WriteChunkToDestination(string destinationFilePath, ChunkInfo chunkInfo)
         {
-            using (var destStream = new FileStream(destinationPath, FileMode.Open, FileAccess.Write, FileShare.Write))
+            using (var destinationFileStream = new FileStream(destinationFilePath, FileMode.Open, FileAccess.Write, FileShare.Write))
             {
-                destStream.Seek(chunk.Position, SeekOrigin.Begin);
+                destinationFileStream.Seek(chunkInfo.Position, SeekOrigin.Begin);
 
-                await destStream.WriteAsync(chunk.Buffer, 0, chunk.Size);
-                await destStream.FlushAsync();
+                await destinationFileStream.WriteAsync(chunkInfo.Buffer, 0, chunkInfo.Size);
+                await destinationFileStream.FlushAsync();
             }
         }
 
-        private async Task<string?> ReadAndHashDestinationChunk(string destinationPath, long position, int chunkSize)
+        private async Task<string?> ReadAndHashDestinationChunk(string destinationFilePath, long position, int chunkSize)
         {
             byte[] verifyBuffer = new byte[chunkSize];
 
-            using (var destStream = new FileStream(destinationPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var destinationFileStream = new FileStream(destinationFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                destStream.Seek(position, SeekOrigin.Begin);
+                destinationFileStream.Seek(position, SeekOrigin.Begin);
 
-                int bytesRead = await destStream.ReadAsync(verifyBuffer, 0, chunkSize);
+                int bytesRead = await destinationFileStream.ReadAsync(verifyBuffer, 0, chunkSize);
 
                 if (bytesRead != chunkSize)
                 {
