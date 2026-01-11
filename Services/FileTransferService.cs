@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+﻿using FileTransferTool.Services.Abstractions;
 
 namespace FileTransferTool.Services
 {
@@ -7,34 +7,44 @@ namespace FileTransferTool.Services
         private const int CHUNK_SIZE = 1024 * 1024;
         private const int MAX_RETRY_ATTEMPTS = 3;
 
-        private readonly List<ChunkInfo> transferedChunks = new List<ChunkInfo>();
+        private readonly List<ChunkInfo> transferedChunks;
+        private readonly IFileSystemService fileSystem;
+        private readonly ILogger logger;
+        private readonly IHashCalculator hashCalculator;
+
+        public FileTransferService(IFileSystemService fileSystem, ILogger logger, IHashCalculator hashCalculator)
+        {
+            this.fileSystem = fileSystem;
+            this.logger = logger;
+            this.hashCalculator = hashCalculator;
+            this.transferedChunks = new List<ChunkInfo>();
+        }
 
         public async Task TransferFileAsync(string sourceFilePath, string destinationDirectory)
         {
             string fileName = Path.GetFileName(sourceFilePath);
             string destinationFilePath = Path.Combine(destinationDirectory, fileName);
-            var fileInfo = new FileInfo(sourceFilePath);
-            long fileSize = fileInfo.Length;
+            long fileSize = fileSystem.GetFileSize(sourceFilePath);
             long totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-            Console.WriteLine($"\n=== Starting File Transfer ===");
-            Console.WriteLine($"File size: {FormatBytes(fileSize)}");
-            Console.WriteLine($"Chunk size: {FormatBytes(CHUNK_SIZE)}");
-            Console.WriteLine($"Total chunks: {totalChunks}\n");
+            logger.LogInfo($"\n=== Starting File Transfer ===");
+            logger.LogInfo($"File size: {FormatBytes(fileSize)}");
+            logger.LogInfo($"Chunk size: {FormatBytes(CHUNK_SIZE)}");
+            logger.LogInfo($"Total chunks: {totalChunks}\n");
 
-            using (var destinationStream = new FileStream(destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var destinationStream = fileSystem.CreateFile(destinationFilePath))
             {
-                destinationStream.SetLength(fileSize);
+                fileSystem.SetFileLength(destinationStream, fileSize);
             }
 
-            Console.WriteLine("Transferring chunks:\n");
+            logger.LogInfo("Transferring chunks:\n");
 
             for (long chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
             {
                 await TransferChunk(sourceFilePath, destinationFilePath, chunkIndex, fileSize);
             }
 
-            Console.WriteLine("\n\nAll chunks transferred successfully!");
+            logger.LogInfo("\n\nAll chunks transferred successfully!");
 
             DisplayChunkChecksums();
 
@@ -67,7 +77,7 @@ namespace FileTransferTool.Services
         {
             byte[] buffer = new byte[chunkSize];
 
-            using (var sourceFileStream = new FileStream(sourceFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sourceFileStream = fileSystem.OpenRead(sourceFilePath))
             {
                 sourceFileStream.Seek(position, SeekOrigin.Begin);
 
@@ -78,7 +88,7 @@ namespace FileTransferTool.Services
                     throw new IOException($"Expected to read {chunkSize} bytes, but only read {bytesRead} bytes at position {position}");
                 }
 
-                string hash = CalculateMD5(buffer, chunkSize);
+                string hash = hashCalculator.CalculateMD5(buffer, chunkSize);
 
                 return (buffer, hash);
             }
@@ -86,37 +96,37 @@ namespace FileTransferTool.Services
 
         private async Task WriteAndVerifyChunk(string destinationFilePath, ChunkInfo chunkInfo)
         {
-            bool verified = false;
+            bool verifiedChunk = false;
             int attempts = 0;
 
-            while (!verified && attempts < MAX_RETRY_ATTEMPTS)
+            while (!verifiedChunk && attempts < MAX_RETRY_ATTEMPTS)
             {
                 attempts++;
 
                 await WriteChunkToDestination(destinationFilePath, chunkInfo);
 
-                string? destinationHash = await ReadAndHashDestinationChunk(destinationFilePath, chunkInfo.Position, chunkInfo.Size);
+                string? destinationFileHash = await ReadAndHashDestinationChunk(destinationFilePath, chunkInfo.Position, chunkInfo.Size);
 
-                if (destinationHash == null)
+                if (destinationFileHash == null)
                 {
-                    Console.WriteLine($"Warning: Failed to read chunk for verification at position {chunkInfo.Position}. Retrying...");
+                    logger.LogWarning($"Warning: Failed to read chunk for verification at position {chunkInfo.Position}. Retrying...");
                     continue;
                 }
 
-                if (chunkInfo.Hash == destinationHash)
+                if (chunkInfo.Hash == destinationFileHash)
                 {
-                    verified = true;
-                    Console.WriteLine($"Chunk {chunkInfo.Index + 1}/{chunkInfo.TotalChunks}: Position={chunkInfo.Position}, Hash={chunkInfo.Hash} [VERIFIED]");
+                    verifiedChunk = true;
+                    logger.LogInfo($"Chunk {chunkInfo.Index + 1}/{chunkInfo.TotalChunks}: Position={chunkInfo.Position}, Hash={chunkInfo.Hash} [VERIFIED]");
                 }
                 else
                 {
-                    Console.WriteLine($"Chunk {chunkInfo.Index + 1}: Hash mismatch at position {chunkInfo.Position}! " +
-                                    $"Source: {chunkInfo.Hash}, Destination: {destinationHash}. " +
+                    logger.LogWarning($"Chunk {chunkInfo.Index + 1}: Hash mismatch at position {chunkInfo.Position}! " +
+                                    $"Source: {chunkInfo.Hash}, Destination: {destinationFileHash}. " +
                                     $"Retry attempt {attempts}/{MAX_RETRY_ATTEMPTS}");
                 }
             }
 
-            if (!verified)
+            if (!verifiedChunk)
             {
                 throw new Exception($"Failed to verify chunk at position {chunkInfo.Position} after {MAX_RETRY_ATTEMPTS} attempts. " +
                                   $"Source hash: {chunkInfo.Hash}");
@@ -125,7 +135,7 @@ namespace FileTransferTool.Services
 
         private async Task WriteChunkToDestination(string destinationFilePath, ChunkInfo chunkInfo)
         {
-            using (var destinationFileStream = new FileStream(destinationFilePath, FileMode.Open, FileAccess.Write, FileShare.Write))
+            using (var destinationFileStream = fileSystem.OpenWrite(destinationFilePath))
             {
                 destinationFileStream.Seek(chunkInfo.Position, SeekOrigin.Begin);
 
@@ -138,7 +148,7 @@ namespace FileTransferTool.Services
         {
             byte[] verifyBuffer = new byte[chunkSize];
 
-            using (var destinationFileStream = new FileStream(destinationFilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var destinationFileStream = fileSystem.OpenRead(destinationFilePath))
             {
                 destinationFileStream.Seek(position, SeekOrigin.Begin);
 
@@ -149,68 +159,56 @@ namespace FileTransferTool.Services
                     return null;
                 }
 
-                return CalculateMD5(verifyBuffer, chunkSize);
+                return hashCalculator.CalculateMD5(verifyBuffer, chunkSize);
             }
         }
 
         private async Task VerifyCompleteFile(string sourceFilePath, string destinationFilePath)
         {
-            Console.WriteLine("Verifying entire file integrity...\n");
+            logger.LogInfo("Verifying entire file integrity...\n");
 
-            Console.Write("Calculating SHA256 for source file... ");
+            logger.LogInfo("Calculating SHA256 for source file... ");
             string sourceFileHash = await CalculateFileSHA256(sourceFilePath);
-            Console.WriteLine("Done");
+            logger.LogInfo("Done");
 
-            Console.Write("Calculating SHA256 for destination file... ");
+            logger.LogInfo("Calculating SHA256 for destination file... ");
             string destinationFileHash = await CalculateFileSHA256(destinationFilePath);
-            Console.WriteLine("Done");
+            logger.LogInfo("Done");
 
-            Console.WriteLine("\n=== Final File Verification (SHA256) ===");
-            Console.WriteLine($"Source:      {sourceFileHash}");
-            Console.WriteLine($"Destination: {destinationFileHash}");
+            logger.LogInfo("\n=== Final File Verification (SHA256) ===");
+            logger.LogInfo($"Source:      {sourceFileHash}");
+            logger.LogInfo($"Destination: {destinationFileHash}");
 
             if (sourceFileHash == destinationFileHash)
             {
-                Console.WriteLine("\n✓ File integrity verified successfully!");
+                logger.LogSuccess("\n File integrity verified successfully!");
             }
             else
             {
-                Console.WriteLine("\nFile verification FAILED!");
+                logger.LogError("\nFile verification FAILED!");
                 throw new Exception("Final SHA256 hash verification failed - file integrity compromised!");
             }
         }
 
         private void DisplayChunkChecksums()
         {
-            Console.WriteLine("=== Chunk Checksums (MD5) ===");
+            logger.LogInfo("=== Chunk Checksums (MD5) ===");
 
             var orderedChunks = transferedChunks.OrderBy(c => c.Position).ToList();
 
             foreach (var chunk in orderedChunks)
             {
-                Console.WriteLine($"{chunk.Index + 1}) position = {chunk.Position}, hash = {chunk.Hash}");
+                logger.LogInfo($"{chunk.Index + 1}) position = {chunk.Position}, hash = {chunk.Hash}");
             }
 
-            Console.WriteLine();
+            logger.LogInfo("");
         }
 
         private async Task<string> CalculateFileSHA256(string filePath)
         {
-            using (var sha256 = SHA256.Create())
-            using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 8192, true))
+            using (var stream = fileSystem.OpenRead(filePath))
             {
-                byte[] hash = await Task.Run(() => sha256.ComputeHash(stream));
-                return BitConverter.ToString(hash);
-            }
-        }
-
-        private string CalculateMD5(byte[] data, int length)
-        {
-            using (var md5 = MD5.Create())
-            {
-                byte[] hash = md5.ComputeHash(data, 0, length);
-
-                return BitConverter.ToString(hash);
+                return await hashCalculator.CalculateSHA256(stream);
             }
         }
 
