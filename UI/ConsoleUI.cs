@@ -6,6 +6,8 @@
 
         public string DestinationDirectory { get; private set; } = string.Empty;
 
+        public bool ConcurencyUsed { get; private set; }
+
         public void Run()
         {
             Console.WriteLine("File Transfer Tool");
@@ -42,6 +44,8 @@
             DisplayFileInfo(SourcePath, destinationPath);
 
             Console.WriteLine("Source and destination verified.");
+
+            this.ConcurencyUsed = ConcurencyQuestion();
         }
 
 
@@ -135,6 +139,29 @@
 
                 Console.WriteLine("Please enter YES or NO");
             }
+        }
+
+        private bool ConcurencyQuestion()
+        {
+            while (true)
+            {
+                Console.WriteLine("Do you want to use concurency? Yes/No");
+                string? input = Console.ReadLine()?.Trim().ToUpperInvariant();
+
+                bool? result = input switch
+                {
+                    "Y" or "YES" => true,
+                    "N" or "NO" => false,
+                    _ => null
+                };
+
+                if (result.HasValue)
+                {
+                    return result.Value;
+                }
+
+                Console.WriteLine("Please enter YES or NO");
+            }    
         }
     }
 }

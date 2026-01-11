@@ -13,9 +13,10 @@ if (!string.IsNullOrWhiteSpace(console.DestinationDirectory))
         var logger = new ConsoleLogger();
         var hashCalculator = new HashCalculator();
 
-        var fileTransferService = new FileTransferService(fileSystem, logger, hashCalculator);
-
-        await fileTransferService.TransferFileAsync(console.SourcePath, console.DestinationDirectory);
+        using (var fileTransferService = new FileTransferService(fileSystem, logger, hashCalculator, console.ConcurencyUsed))
+        {
+            await fileTransferService.TransferFileAsync(console.SourcePath, console.DestinationDirectory);
+        }
     }
     catch (Exception ex)
     {

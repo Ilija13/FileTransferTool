@@ -4,17 +4,17 @@ namespace FileTransferTool.Services.Implementations
 {
     public class FileSystemService : IFileSystemService
     {
-        public Stream OpenRead(string path)
+        public FileStream OpenRead(string path)
         {
-            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         }
 
-        public Stream OpenWrite(string path)
+        public FileStream OpenWrite(string path)
         {
-            return new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Write);
+            return new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
         }
 
-        public Stream CreateFile(string path)
+        public FileStream CreateFile(string path)
         {
             return new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
         }
