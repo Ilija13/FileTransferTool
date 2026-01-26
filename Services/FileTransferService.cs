@@ -1,5 +1,6 @@
 ﻿using FileTransferTool.Services.Abstractions;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace FileTransferTool.Services
 {
@@ -7,125 +8,115 @@ namespace FileTransferTool.Services
     {
         private const int CHUNK_SIZE = 1024 * 1024;
         private const int MAX_RETRY_ATTEMPTS = 3;
-        private const int MAX_THREADS = 4;
 
-        private readonly ConcurrentBag<ChunkInfo> transferedChunks;
         private readonly IFileSystemService fileSystem;
         private readonly ILogger logger;
         private readonly IHashCalculator hashCalculator;
-        private readonly SemaphoreSlim readingChunksSemaphore = new SemaphoreSlim(MAX_THREADS);
-        private readonly SemaphoreSlim writingStreamSemaphore = new SemaphoreSlim(1, 1);
-        private readonly bool concurencyUsed;
+        private readonly bool concurency;
+        private readonly ConcurrentBag<(long position, string hash)> transferedChunks = new();
 
-
-        public FileTransferService(IFileSystemService fileSystem, ILogger logger, IHashCalculator hashCalculator, bool concurencyUsed)
+        public FileTransferService(IFileSystemService fileSystem, ILogger logger, IHashCalculator hashCalculator, bool concurency)
         {
             this.fileSystem = fileSystem;
             this.logger = logger;
             this.hashCalculator = hashCalculator;
-            this.transferedChunks = new ConcurrentBag<ChunkInfo>();
-            this.concurencyUsed = concurencyUsed;
+            this.concurency = concurency;
         }
 
-        public async Task TransferFileAsync(string sourceFilePath, string destinationDirectory)
+        public async Task TransferFileAsync(string sourceFilePath, string destinationDirectoryPath)
         {
             string fileName = Path.GetFileName(sourceFilePath);
-            string destinationFilePath = Path.Combine(destinationDirectory, fileName);
+            string destinationFilePath = Path.Combine(destinationDirectoryPath, fileName);
             long fileSize = fileSystem.GetFileSize(sourceFilePath);
-            long totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            long totalChunks = (long)Math.Ceiling((double)fileSize / CHUNK_SIZE);
 
-            var fileTransferInfo = new FileTransferInfo
-            (
+            var fileInfo = new FileTransferInfo(
                 FileName: fileName,
                 SourceFilePath: sourceFilePath,
                 DestinationFilePath: destinationFilePath,
                 FileSize: fileSize,
-                TotalChunks: totalChunks,
-                ConcurencyUsed: concurencyUsed
+                TotalChunks: totalChunks
             );
-
-            logger.LogInfo($"\n=== Starting File Transfer ===");
-            logger.LogInfo($"File size: {FormatBytes(fileSize)}");
-            logger.LogInfo($"Chunk size: {FormatBytes(CHUNK_SIZE)}");
-            logger.LogInfo($"Total chunks: {totalChunks}\n");
 
             using (var destinationStream = fileSystem.CreateFile(destinationFilePath))
             {
                 fileSystem.SetFileLength(destinationStream, fileSize);
             }
-            using var destinationWritingFileStream = fileSystem.OpenWrite(destinationFilePath);
 
-            logger.LogInfo("Transferring chunks:\n");
-
-            var startTime = DateTime.Now;
-
-            await StartTransferProcess(fileTransferInfo, destinationWritingFileStream);
-
-            var endTime = DateTime.Now;
-            TimeSpan elapsed = endTime - startTime;
-
-            logger.LogInfo($"File transfered in: {elapsed} seconds");
-
-            logger.LogInfo("\n\nAll chunks transferred successfully!");
-
-            DisplayChunkChecksums();
-
-            await VerifyCompleteFile(sourceFilePath, destinationFilePath);
-        }
-
-        private async Task TransferChunk(string sourceFilePath, string destinationFilePath, long chunkIndex, long fileSize, FileStream destinationWritingFileStream)
-        {
-            long startingPosition = chunkIndex * CHUNK_SIZE;
-            int chunkSize = (int)Math.Min(CHUNK_SIZE, fileSize - startingPosition);
-            long totalChunks = (fileSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-            var (buffer, sourceHash) = await ReadAndHashSourceChunk(sourceFilePath, startingPosition, chunkSize);
-
-            var chunkInfo = new ChunkInfo
+            try
             {
-                Buffer = buffer,
-                Hash = sourceHash,
-                Position = startingPosition,
-                Size = chunkSize,
-                Index = chunkIndex,
-                TotalChunks = totalChunks
-            };
+                if (concurency)
+                {
+                    await TransferFileConcurrently(fileInfo);
+                }
+                else
+                {
+                    await TransferFileSequentially(fileInfo);
+                }
 
-            await WriteAndVerifyChunk(destinationWritingFileStream, chunkInfo, destinationFilePath);
+                logger.LogInfo("\nAll chunks transferred successfully!\n");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError($"\nTransfer failed: {ex.Message}");
 
-            transferedChunks.Add(chunkInfo);
+                if (File.Exists(destinationFilePath))
+                {
+                    try
+                    {
+                        File.Delete(destinationFilePath);
+                        logger.LogInfo("Cleaned up incomplete destination file.");
+                    }
+                    catch
+                    {
+                        logger.LogWarning("Could not delete incomplete destination file.");
+                    }
+                }
+                throw;
+            }
         }
 
-        private async Task<(byte[] buffer, string hash)> ReadAndHashSourceChunk(string sourceFilePath, long position, int chunkSize)
+        private async Task TransferFileSequentially(FileTransferInfo fileInfo)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            using var sourceStream = fileSystem.OpenRead(fileInfo.SourceFilePath);
+            using var destinationWritingStream = new FileStream(fileInfo.DestinationFilePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite,
+                CHUNK_SIZE, useAsync: true);
+            using var destinationReadingStream = new FileStream(fileInfo.DestinationFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                CHUNK_SIZE, useAsync: true);
+
+
+            for (long chunkIndex = 0; chunkIndex < fileInfo.TotalChunks; chunkIndex++)
+            {
+                long position = chunkIndex * CHUNK_SIZE;
+                int chunkSize = (int)Math.Min(CHUNK_SIZE, fileInfo.FileSize - position);
+                var (buffer, sourceHash) = await ReadAndHashSourceChunk(sourceStream, position, chunkSize);
+                await WriteAndVerifyChunk(destinationWritingStream, destinationReadingStream, position, chunkSize, buffer, sourceHash, chunkIndex, fileInfo.TotalChunks);
+            }
+            stopwatch.Stop();
+            logger.LogInfo($"\nTransfer completed in {stopwatch.Elapsed.TotalSeconds:F2} seconds");
+
+            await VerifyFileSHA256(fileInfo);
+        }
+
+        private async Task<(byte[] buffer, string sourceHash)> ReadAndHashSourceChunk(FileStream sourceStream, long position, int chunkSize)
         {
             byte[] buffer = new byte[chunkSize];
 
-            await readingChunksSemaphore.WaitAsync();
-            try
+            sourceStream.Seek(position, SeekOrigin.Begin);
+            int bytesRead = await sourceStream.ReadAsync(buffer, 0, chunkSize);
+
+            if (bytesRead != chunkSize)
             {
-                using (var sourceFileStream = fileSystem.OpenRead(sourceFilePath))
-                {
-                    sourceFileStream.Seek(position, SeekOrigin.Begin);
-
-                    int bytesRead = await sourceFileStream.ReadAsync(buffer, 0, chunkSize);
-
-                    if (bytesRead != chunkSize)
-                    {
-                        throw new IOException($"Expected to read {chunkSize} bytes, but only read {bytesRead} bytes at position {position}");
-                    }
-
-                    string hash = hashCalculator.CalculateMD5(buffer, chunkSize);
-
-                    return (buffer, hash);
-                }
+                throw new IOException($"Expected to read {chunkSize} bytes, but only read {bytesRead} bytes at position {position}");
             }
-            finally
-            {
-                readingChunksSemaphore.Release();
-            }
+
+            string hash = hashCalculator.CalculateMD5(buffer, chunkSize);
+            return (buffer, hash);
         }
 
-        private async Task WriteAndVerifyChunk(FileStream destinationWritingFileStream, ChunkInfo chunkInfo, string destinationFilePath)
+        private async Task WriteAndVerifyChunk(FileStream destinationWritingStream, FileStream destinationReadingStream, long position, int chunkSize,
+            byte[] buffer, string sourceHash, long chunkIndex, long totalChunks)
         {
             bool verifiedChunk = false;
             int attempts = 0;
@@ -134,160 +125,168 @@ namespace FileTransferTool.Services
             {
                 attempts++;
 
-                await WriteChunkToDestination(destinationWritingFileStream, chunkInfo);
+                await WriteChunkToDestination(destinationWritingStream, position, buffer, chunkSize);
 
-                string? destinationFileHash = await ReadAndHashDestinationChunk(destinationFilePath, chunkInfo.Position, chunkInfo.Size);
-
-                if (destinationFileHash == null)
+                string destinationFileHash;
+                try
                 {
-                    logger.LogWarning($"Warning: Failed to read chunk for verification at position {chunkInfo.Position}. Retrying...");
+                    destinationFileHash = await ReadAndHashDestinationChunk(destinationReadingStream, position, chunkSize);
+                }
+                catch (IOException)
+                {
+                    logger.LogWarning($"Warning: Failed to read chunk at position {position}. Retrying... (Attempt {attempts}/{MAX_RETRY_ATTEMPTS})");
                     continue;
                 }
 
-                if (chunkInfo.Hash == destinationFileHash)
+                if (sourceHash == destinationFileHash)
                 {
                     verifiedChunk = true;
-                    logger.LogInfo($"Chunk {chunkInfo.Index + 1}/{chunkInfo.TotalChunks}: Position={chunkInfo.Position}, Hash={chunkInfo.Hash} [VERIFIED]");
+                    this.transferedChunks.Add((position, destinationFileHash));
+                    logger.LogInfo($"Chunk {chunkIndex + 1}/{totalChunks}: Position={position}, Hash={sourceHash} [VERIFIED]");
                 }
                 else
                 {
-                    logger.LogWarning($"Chunk {chunkInfo.Index + 1}: Hash mismatch at position {chunkInfo.Position}! " +
-                                    $"Source: {chunkInfo.Hash}, Destination: {destinationFileHash}. " +
-                                    $"Retry attempt {attempts}/{MAX_RETRY_ATTEMPTS}");
+                    logger.LogWarning($"Chunk {chunkIndex + 1}/{totalChunks}: Hash mismatch at position {position}! " +
+                                      $"Source: {sourceHash}, Destination: {destinationFileHash}. " +
+                                      $"Retry attempt {attempts}/{MAX_RETRY_ATTEMPTS}");
                 }
             }
 
             if (!verifiedChunk)
             {
-                throw new Exception($"Failed to verify chunk at position {chunkInfo.Position} after {MAX_RETRY_ATTEMPTS} attempts. " +
-                                  $"Source hash: {chunkInfo.Hash}");
+                throw new Exception($"Failed to verify chunk at position {position} after {MAX_RETRY_ATTEMPTS} attempts.");
             }
         }
 
-        private async Task WriteChunkToDestination(FileStream destinationFileStream, ChunkInfo chunkInfo)
-        {
-            await writingStreamSemaphore.WaitAsync();
-            try
-            {
-                destinationFileStream.Seek(chunkInfo.Position, SeekOrigin.Begin);
 
-                await destinationFileStream.WriteAsync(chunkInfo.Buffer, 0, chunkInfo.Size);
-                await destinationFileStream.FlushAsync();
-            }
-            finally
+        private async Task<string> ReadAndHashDestinationChunk(FileStream destinationReadingStream, long position, int chunkSize)
+        {
+            byte[] buffer = new byte[chunkSize];
+            destinationReadingStream.Seek(position, SeekOrigin.Begin);
+            int bytesRead = await destinationReadingStream.ReadAsync(buffer, 0, chunkSize);
+
+            if (bytesRead != chunkSize)
             {
-                writingStreamSemaphore.Release();
+                throw new IOException($"Expected to read {chunkSize} bytes, but only read {bytesRead} bytes at position {position}");
             }
+
+            return hashCalculator.CalculateMD5(buffer, chunkSize);
         }
 
-        private async Task<string?> ReadAndHashDestinationChunk(string destinationFilePath, long position, int chunkSize)
+        private async Task WriteChunkToDestination(FileStream destinationFileStream, long position, byte[] buffer, int chunkSize)
         {
-            byte[] verifyBuffer = new byte[chunkSize];
-
-            using (var destinationFileStream = fileSystem.OpenRead(destinationFilePath))
-            {
-                destinationFileStream.Seek(position, SeekOrigin.Begin);
-
-                int bytesRead = await destinationFileStream.ReadAsync(verifyBuffer, 0, chunkSize);
-
-                if (bytesRead != chunkSize)
-                {
-                    return null;
-                }
-
-                return hashCalculator.CalculateMD5(verifyBuffer, chunkSize);
-            }
-
+            destinationFileStream.Seek(position, SeekOrigin.Begin);
+            await destinationFileStream.WriteAsync(buffer, 0, chunkSize);
+            await destinationFileStream.FlushAsync();
         }
 
-        private async Task VerifyCompleteFile(string sourceFilePath, string destinationFilePath)
+        private async Task VerifyFileSHA256(FileTransferInfo fileInfo)
         {
-            logger.LogInfo("Verifying entire file integrity...\n");
+            logger.LogInfo("\nVerifying entire file integrity using SHA256...");
 
-            logger.LogInfo("Calculating SHA256 for source file... ");
-            string sourceFileHash = await CalculateFileSHA256(sourceFilePath);
-            logger.LogInfo("Done");
+            using var sourceStream = fileSystem.OpenRead(fileInfo.SourceFilePath);
+            using var destinationStream = fileSystem.OpenRead(fileInfo.DestinationFilePath);
 
-            logger.LogInfo("Calculating SHA256 for destination file... ");
-            string destinationFileHash = await CalculateFileSHA256(destinationFilePath);
-            logger.LogInfo("Done");
+            string sourceFileHash = hashCalculator.CalculateSHA256(sourceStream);
+            string destinationFileHash = hashCalculator.CalculateSHA256(destinationStream);
 
-            logger.LogInfo("\n=== Final File Verification (SHA256) ===");
-            logger.LogInfo($"Source:      {sourceFileHash}");
-            logger.LogInfo($"Destination: {destinationFileHash}");
+            logger.LogInfo($"Source SHA256:      {sourceFileHash}");
+            logger.LogInfo($"Destination SHA256: {destinationFileHash}");
 
             if (sourceFileHash == destinationFileHash)
             {
-                logger.LogSuccess("\n File integrity verified successfully!");
+                logger.LogSuccess("File integrity verified successfully!");
             }
             else
             {
-                logger.LogError("\nFile verification FAILED!");
-                throw new Exception("Final SHA256 hash verification failed - file integrity compromised!");
+                throw new Exception("File verification FAILED! SHA256 hash mismatch.");
             }
+        }
+
+        private async Task TransferFileConcurrently(FileTransferInfo fileInfo)
+        {
+            var stopwatch = Stopwatch.StartNew();
+
+            int regionCount = 4;
+            var regions = SplitFileIntoRegions(fileInfo.FileSize, regionCount);
+            var tasks = new List<Task>(regionCount);
+
+            for (int i = 0; i < regionCount; i++)
+            {
+                var region = regions[i];
+                tasks.Add(TransferRegion(fileInfo, region.Start, region.End));
+            }
+
+            await Task.WhenAll(tasks);
+
+            stopwatch.Stop();
+            logger.LogInfo($"It took {stopwatch.Elapsed.TotalSeconds:F2} seconds to transfer the file concurrently");
+
+            DisplayChunkChecksums();
+
+            await VerifyFileSHA256(fileInfo);
+        }
+
+        private async Task TransferRegion(FileTransferInfo fileInfo, long start, long end)
+        {
+            using var sourceStream = fileSystem.OpenRead(fileInfo.SourceFilePath);
+            using var destinationWritingStream = new FileStream(fileInfo.DestinationFilePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite,
+                CHUNK_SIZE, useAsync: true);
+            using var destinationReadingStream = new FileStream(fileInfo.DestinationFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                CHUNK_SIZE, useAsync: true);
+
+            long position = start;
+            long chunkIndex = start / CHUNK_SIZE;
+            long totalChunks = fileInfo.TotalChunks;
+
+            while (position < end)
+            {
+                int chunkSize = (int)Math.Min(CHUNK_SIZE, Math.Min(end - position, fileInfo.FileSize - position));
+
+                var (buffer, sourceHash) = await ReadAndHashSourceChunk(sourceStream, position, chunkSize);
+
+                await WriteAndVerifyChunk(destinationWritingStream, destinationReadingStream, position, chunkSize, buffer, sourceHash, chunkIndex, totalChunks);
+                position += chunkSize;
+                chunkIndex++;
+            }
+        }
+
+        private (long Start, long End)[] SplitFileIntoRegions(long fileSize, int regionCount)
+        {
+            var regions = new (long Start, long End)[regionCount];
+            long baseRegionSize = fileSize / regionCount;
+            long remainder = fileSize % regionCount;
+            long currentStart = 0;
+
+            for (int i = 0; i < regionCount; i++)
+            {
+                long size = baseRegionSize + (i == regionCount - 1 ? remainder : 0);
+                long start = currentStart;
+                long end = start + size;
+                regions[i] = (start, end);
+                currentStart = end;
+            }
+
+            return regions;
         }
 
         private void DisplayChunkChecksums()
         {
             logger.LogInfo("=== Chunk Checksums (MD5) ===");
 
-            var orderedChunks = transferedChunks.OrderBy(c => c.Position).ToList();
+            var orderedChunks = transferedChunks.OrderBy(c => c.position).ToList();
 
             foreach (var chunk in orderedChunks)
             {
-                logger.LogInfo($"{chunk.Index + 1}) position = {chunk.Position}, hash = {chunk.Hash}");
+                logger.LogInfo($"position = {chunk.position}, hash = {chunk.hash}");
             }
 
             logger.LogInfo("");
         }
 
-        private async Task<string> CalculateFileSHA256(string filePath)
-        {
-            using (var stream = fileSystem.OpenRead(filePath))
-            {
-                return await hashCalculator.CalculateSHA256(stream);
-            }
-        }
-
-        private string FormatBytes(long bytes)
-        {
-            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
-            double length = bytes;
-            int order = 0;
-
-            while (length >= 1024 && order < sizes.Length - 1)
-            {
-                order++;
-                length = length / 1024;
-            }
-
-            return $"{length:0.##} {sizes[order]}";
-        }
-
         public void Dispose()
         {
-            readingChunksSemaphore.Dispose();
-            writingStreamSemaphore.Dispose();
-        }
 
-        private async Task StartTransferProcess(FileTransferInfo info, FileStream stream)
-        {
-            if (info.ConcurencyUsed)
-            {
-                var tasks = new List<Task>();
-                for (long chunkIndex = 0; chunkIndex < info.TotalChunks; chunkIndex++)
-                {
-                    tasks.Add(TransferChunk(info.SourceFilePath, info.DestinationFilePath, chunkIndex, info.FileSize, stream));
-                }
-                await Task.WhenAll(tasks);
-            }
-            else
-            {
-                for (long chunkIndex = 0; chunkIndex < info.TotalChunks; chunkIndex++)
-                {
-                    await TransferChunk(info.SourceFilePath, info.DestinationFilePath, chunkIndex, info.FileSize, stream);
-                }
-            }
         }
     }
 }

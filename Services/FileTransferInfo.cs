@@ -5,7 +5,6 @@
         string SourceFilePath,
         string DestinationFilePath,
         long FileSize,
-        long TotalChunks,
-        bool ConcurencyUsed
+        long TotalChunks
     );
 }

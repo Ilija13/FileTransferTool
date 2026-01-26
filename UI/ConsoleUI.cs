@@ -3,9 +3,7 @@
     public class ConsoleUI
     {
         public string SourcePath { get; private set; } = string.Empty;
-
         public string DestinationDirectory { get; private set; } = string.Empty;
-
         public bool ConcurencyUsed { get; private set; }
 
         public void Run()
@@ -45,7 +43,7 @@
 
             Console.WriteLine("Source and destination verified.");
 
-            this.ConcurencyUsed = ConcurencyQuestion();
+            this.ConcurencyUsed = QuestionForTheUser("Do you want to use concurency ? Yes / No");
         }
 
 
@@ -107,7 +105,7 @@
                 return DestinationValidationResult.Invalid;
             }
 
-            if (File.Exists(intendedDestPath) && !ConfirmOverwrite(intendedDestPath))
+            if (File.Exists(intendedDestPath) && !QuestionForTheUser("File already exists. Do you want to overwrite it? (YES/NO)"))
             {
                 return DestinationValidationResult.Cancelled;
             }
@@ -116,12 +114,11 @@
             return DestinationValidationResult.Valid;
         }
 
-
-        private bool ConfirmOverwrite(string destinationPath)
+        private bool QuestionForTheUser(string message)
         {
             while (true)
             {
-                Console.WriteLine($"File already exists at destination:\n{destinationPath}\nDo you want to overwrite it? (YES/NO)");
+                Console.WriteLine(message);
 
                 string? input = Console.ReadLine()?.Trim().ToUpperInvariant();
 
@@ -139,29 +136,6 @@
 
                 Console.WriteLine("Please enter YES or NO");
             }
-        }
-
-        private bool ConcurencyQuestion()
-        {
-            while (true)
-            {
-                Console.WriteLine("Do you want to use concurency? Yes/No");
-                string? input = Console.ReadLine()?.Trim().ToUpperInvariant();
-
-                bool? result = input switch
-                {
-                    "Y" or "YES" => true,
-                    "N" or "NO" => false,
-                    _ => null
-                };
-
-                if (result.HasValue)
-                {
-                    return result.Value;
-                }
-
-                Console.WriteLine("Please enter YES or NO");
-            }    
         }
     }
 }
